@@ -1,45 +1,45 @@
-# Edge Map Super-Resolution Demo (SDF vs PDE)
+# 边缘图超分辨率 Demo (SDF vs PDE)
 
-A web-based demo comparing two methods for upscaling binary edge maps while maintaining sharpness: **Signed Distance Field (SDF)** and **Shock Filter PDE**.
+这是一个基于 Web 的演示项目，用于对比两种在保持边缘锐利度的同时放大二值边缘图的方法：**符号距离场 (SDF)** 和 **Shock Filter PDE**。
 
-## Features
+## 功能特性
 
-*   **Edge Detection**: Uses Canny (auto/manual) with optional Zhang-Suen thinning.
-*   **Method 1: SDF Upscaling**: Converts edges to a distance field, upscales the field, and reconstructs edges via thresholding. Guaranteed to be sharp (binary).
-*   **Method 2: Shock Filter PDE**: Iteratively evolves a bicubic-interpolated image to sharpen edges using Partial Differential Equations.
-*   **Side-by-Side Comparison**: Visually compare Baseline (Bicubic), SDF, and PDE results.
-*   **Interactive**: Adjust scale factor, edge width, and detection parameters in the browser.
+*   **边缘检测**：使用 Canny 算法（支持自动/手动参数），并可选 Zhang-Suen 细化算法。
+*   **方法 1: SDF 放大**：将边缘转换为距离场，放大距离场，然后通过阈值重建边缘。保证结果锐利（二值化）。
+*   **方法 2: Shock Filter PDE**：利用偏微分方程（PDE）迭代演化双线性插值后的图像，从而锐化边缘。
+*   **并排对比**：直观对比基线（双三次插值）、SDF 和 PDE 的结果。
+*   **交互式**：在浏览器中直接调整缩放倍率、边缘宽度和检测参数。
 
-## Requirements
+## 环境要求
 
 *   Python 3.10+
 *   `pip`
 
-## Installation
+## 安装
 
 ```bash
 pip install -r backend/requirements.txt
 ```
 
-## Usage
+## 使用方法
 
-1.  Start the server:
+1.  启动服务器：
     ```bash
     uvicorn backend.app:app --reload --port 8000
     ```
 
-2.  Open your browser at:
+2.  在浏览器中打开：
     `http://127.0.0.1:8000/`
 
-3.  Upload an image (e.g., a line art, icon, or simple photo) and click "Run Upscale".
+3.  上传图片（例如线条画、图标或简单的照片），然后点击 "Run Upscale"（运行放大）。
 
-## Methods Explained
+## 方法原理解析
 
-### Baseline (Bicubic)
-Standard bicubic interpolation followed by thresholding. Often results in jagged "staircase" artifacts or blurred gray edges if not thresholded hard enough.
+### Baseline (Bicubic / 双三次插值)
+标准的双三次插值后进行阈值处理。如果阈值处理不够强硬，通常会导致锯齿状的“阶梯”伪影或模糊的灰色边缘。
 
-### SDF (Signed Distance Field)
-Instead of interpolating the pixels directly, we compute the distance from every pixel to the nearest edge. This "distance field" is smooth and continuous. We resize this field and then re-threshold it. This effectively reconstructs the edge at a higher resolution with perfect sharpness.
+### SDF (Signed Distance Field / 符号距离场)
+我们不直接对像素进行插值，而是计算每个像素到最近边缘的距离。这个“距离场”是平滑且连续的。我们调整距离场的大小，然后重新进行阈值处理。这有效地在更高的分辨率下重建了边缘，并保持了完美的锐利度。
 
-### PDE (Shock Filter)
-Starts with a blurry upscaled image and applies a "Shock Filter". This mathematical process transports information from standard pixels towards the center of edges, creating a discontinuity (shock) at the edge boundary. It effectively "de-blurs" the image numerically.
+### PDE (Shock Filter / 激波滤波器)
+从模糊的放大图像开始，应用“Shock Filter”。这个数学过程将信息从标准像素向边缘中心传输，在边缘边界处产生不连续性（激波）。它有效地通过数值方法对图像进行“去模糊”。
