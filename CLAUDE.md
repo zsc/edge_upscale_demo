@@ -1,433 +1,463 @@
 写一个python + html demo，实现从一张上传图，计算 edge map，然后用 SDF/ PDE放大（如果有多个方法，在 html 上可以进行 side by side 对比）
 
 ---
-下面是一份可以直接交给 **gemini-cli / codex** 去实现的「Python + HTML Demo」规格说明（Spec）。目标是：**上传一张图 → 计算 edge map → 用多种放大方法（至少 SDF 与 PDE）生成高分辨率线稿/边缘图 → HTML 里 side-by-side 对比**。包含明确的文件结构、接口、参数、算法细节（含公式与离散化方法）。
+下面是一份**可以直接交给 gemini-cli / codex 去生成代码**的、可落地的 **Python + HTML demo 规格说明书（spec）**。重点保证：**edge map 超分后仍然锐利**（输出为二值/近二值，避免灰度糊边），并支持 **SDF vs PDE** 在页面上 **side-by-side 对比**。
 
 ---
 
-## 1. 目标与范围
+# 1. 项目目标
 
-### 目标（Must）
+实现一个 Web Demo：
 
-1. 用户在网页上传一张图片（JPG/PNG）。
-2. 后端计算 **edge map**（Canny 为主）。
-3. 将 edge map 进行放大（scale=2/4/8 可选），并实现至少两种方法：
+1. 浏览器上传一张图片（png/jpg）
+2. 后端计算 **edge map**（默认 Canny）
+3. 对 edge map 做 **放大 / 超分**（至少两种方法）并保证输出仍然“锐利”
+4. 前端页面**并排显示**多种方法结果（side-by-side），可调参数并支持下载结果
 
-   * **SDF 放大（Signed Distance Field / Distance Transform 驱动的重建）**
-   * **PDE 放大（在 SDF 上做 PDE 迭代：reinitialization + curvature flow，或同级别 PDE 方法）**
-4. 前端 HTML 以 **side-by-side**（同尺寸）展示：
+必须满足：
 
-   * 原图（可选）
-   * 原分辨率 edge map
-   * 放大结果：Baseline（bicubic/nearest） vs SDF vs PDE（至少两列）
-5. 运行方式简单：`pip install -r requirements.txt` + `uvicorn ...`，本地打开页面可用。
+* **超分后的 edge map 仍然锐利**：
 
-### 非目标（Non-goals）
+  * 输出应为 **二值(0/255)** 或可选 **轻微抗锯齿但边界非常陡峭**（默认二值）
+  * 禁止直接把二值 edge map 用 bilinear/bicubic 放大后当最终结果（那会变灰糊边）
+* 至少包含：
 
-* 不做深度学习超分（不引入 torch）。
-* 不追求完美的向量化（不做 svg 输出）。
-* 不做复杂的全局状态与用户系统。
+  * **SDF 放大法**（Distance Field / Signed Distance Field 思想）
+  * **PDE 法**（用 PDE 数值迭代把放大后的灰边“变陡/变二值”，例如 Shock Filter PDE）
 
 ---
 
-## 2. 技术选型
+# 2. 技术选型
 
-### 后端（Python）
+## 后端
 
-* FastAPI + Uvicorn（轻量，便于 multipart 上传与静态文件）
-* opencv-python（读图、Canny、resize、形态学）
-* numpy（数值）
-* scipy（`distance_transform_edt` 用于距离变换；若不想依赖 scipy，也可用 OpenCV 的 distanceTransform，但 scipy 更直观）
+* Python 3.10+
+* FastAPI + Uvicorn（简单易跑）
+* OpenCV（`opencv-python` 或 `opencv-contrib-python`）
+* NumPy
+* Pillow（保存 PNG / 编码 base64）
 
-### 前端（HTML/JS/CSS）
+依赖建议：
 
-* 原生 HTML + fetch（无框架）
-* CSS flex/grid 做多列对比
+* 如果想直接用 thinning：用 `opencv-contrib-python`（带 `cv2.ximgproc.thinning`）
+* 如果不想用 contrib：实现一个简化版 Zhang-Suen thinning（可选）
+
+## 前端
+
+* 纯 HTML + CSS + Vanilla JS（不引入框架，方便模型生成）
+* `<input type="file">` 上传
+* `fetch('/api/process', { method:'POST', body: FormData })`
+* 用 CSS Grid 并排展示结果
+* 对 edge 图加 `image-rendering: pixelated;` 防止浏览器显示时插值造成“看起来不锐利”
 
 ---
 
-## 3. 项目结构（必须按此组织，便于 codex 生成）
+# 3. 目录结构（必须产出）
 
 ```
-edge_sdf_pde_demo/
-  README.md
-  requirements.txt
-
-  app/
-    main.py
-    imaging.py        # 读图、预处理、edge map
-    sdf.py            # SDF 构建与 SDF upsample 渲染
-    pde.py            # PDE 迭代（reinit + curvature flow）
-    io_utils.py       # 保存 png、生成 id、路径
-
+edge-sr-demo/
+  backend/
+    app.py
+    edge_pipeline.py
+    requirements.txt
   static/
     index.html
     app.js
     style.css
-    out/              # 输出图片（运行时生成/覆盖）
+  README.md
 ```
 
 ---
 
-## 4. HTTP 接口设计
+# 4. 运行方式（必须可一键跑起来）
 
-### 4.1 静态页面
+## 安装
 
-* `GET /` → 返回 `static/index.html`
-* `GET /static/...` → 静态文件（包含 `out/` 结果图）
+```bash
+pip install -r backend/requirements.txt
+```
 
-### 4.2 图像处理 API
+## 启动
 
-* `POST /api/process`
-* Content-Type: `multipart/form-data`
+```bash
+uvicorn backend.app:app --reload --port 8000
+```
 
-#### 入参（form fields）
+浏览器打开：
 
-* `file`: 上传图片（必填）
-* `scale`: int，默认 4，可选 {2, 4, 8}
-* `canny_sigma`: float，默认 0.33（用于自动阈值）
-* `edge_dilate`: int，默认 1（把细 edge 变成“有厚度的 stroke mask”，便于定义 signed distance）
-* `aa_width`: float，默认 1.0（抗锯齿宽度，单位：高分辨率像素）
-* `methods`: string，逗号分隔，例如 `"baseline,sdf,pde"`
+* `http://127.0.0.1:8000/`
 
-#### 出参（JSON）
+---
+
+# 5. 前端 UI/交互需求
+
+页面元素（必须有）：
+
+1. 上传图片
+2. 参数区（至少）：
+
+   * 放大倍率 `scale`: 2 / 4 / 8（默认 4）
+   * Canny 参数：
+
+     * `canny_low`（默认 80）
+     * `canny_high`（默认 160）
+     * 或 `auto_canny` 开关（默认开；开时忽略 low/high）
+   * `edge_width_hr`：输出边线宽度（高分辨率像素单位，默认 1 或 2）
+   * `thinning` 开关：是否做细化（默认开，尽量保证线条锐利且细）
+3. 结果展示区：至少 3 列并排：
+
+   * Baseline（对照）：`bicubic+threshold`
+   * SDF（Distance Field）
+   * PDE（Shock Filter）
+4. 每列展示：
+
+   * 标题（方法名）
+   * 结果图 `<img>`
+   * 下载按钮（下载 PNG）
+5. 额外展示：
+
+   * 原图
+   * 低分辨率 edge map（原尺寸）作为参考
+
+CSS 要求（关键）：
+
+* 对 edge map 的 `<img>` 设置：
+
+  * `image-rendering: pixelated;`
+  * 或 `image-rendering: crisp-edges;`（兼容性一般，可加上）
+* Grid 布局：三列自适应
+
+---
+
+# 6. 后端 API 设计
+
+## 6.1 `GET /`
+
+* 返回 `static/index.html`
+
+## 6.2 `GET /static/*`
+
+* 静态文件：`app.js`, `style.css`
+
+## 6.3 `POST /api/process`
+
+输入：`multipart/form-data`
+
+字段（必须支持）：
+
+* `file`: 上传图片
+* `scale`: int（2/4/8）
+* `edge_width_hr`: float（默认 1.5 或 2.0；用于 SDF 重建时的阈值带宽）
+* `auto_canny`: bool（默认 true）
+* `canny_low`: int（默认 80）
+* `canny_high`: int（默认 160）
+* `blur_sigma`: float（默认 1.0）
+* `thinning`: bool（默认 true）
+* `methods`: 逗号分隔字符串（默认 `"baseline,sdf,pde"`）
+
+输出：JSON
 
 ```json
 {
-  "id": "uuid",
-  "input_url": "/static/out/uuid_input.png",
-  "edge_url": "/static/out/uuid_edge.png",
-  "results": {
-    "baseline": "/static/out/uuid_baseline_x4.png",
-    "sdf": "/static/out/uuid_sdf_x4.png",
-    "pde": "/static/out/uuid_pde_x4.png"
-  },
   "meta": {
     "scale": 4,
     "input_size": [H, W],
-    "output_size": [H4, W4]
+    "edge_size": [H, W],
+    "output_size": [H*scale, W*scale]
+  },
+  "images": {
+    "original": "data:image/png;base64,...",
+    "edge_lr": "data:image/png;base64,...",
+    "baseline": "data:image/png;base64,...",
+    "sdf": "data:image/png;base64,...",
+    "pde": "data:image/png;base64,..."
   }
 }
 ```
 
----
+注意：
 
-## 5. 核心算法规范
-
-> 重要约定：**我们“放大”的对象是 edge/stroke 图，而不是原彩图。**
-> 流程：原图 → edge map（二值/灰度）→ stroke mask → SDF → upsample → 渲染输出。
-
-### 5.1 Edge Map 计算（Canny，带自动阈值）
-
-1. 读入 BGR/RGB，转灰度：
-
-   * `gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)`
-2. 可选降噪（建议开）：
-
-   * `gray_blur = cv2.GaussianBlur(gray, (5,5), 0)`
-3. Canny 阈值自动估计（用 median）：
-
-   * `v = median(gray_blur)`
-   * `lower = max(0, (1 - sigma) * v)`
-   * `upper = min(255, (1 + sigma) * v)`
-4. Canny：
-
-   * `edges = cv2.Canny(gray_blur, lower, upper, L2gradient=True)`
-5. 二值化 edge map：
-
-   * `E = edges > 0`（bool）
-
-输出：
-
-* `edge.png`：建议保存为 0/255 灰度图以便前端显示。
-
-### 5.2 从 Edge 生成 Stroke Mask（用于 signed distance）
-
-Canny 输出是“细线”，严格意义上没有 inside/outside，无法天然定义 signed distance。
-因此必须将 edge 变成一个“有厚度的区域 mask”：
-
-* `M0 = E`（bool）
-* `M = dilate(M0, radius=edge_dilate)`
-  用 `cv2.dilate` 或 `scipy.ndimage.binary_dilation`
-
-建议默认 `edge_dilate=1`（约 3x3 膨胀一次）。
-
-### 5.3 SDF 构建（标准 mask 的 signed distance）
-
-对二值 mask `M`（True 表示 stroke 区域）构建 signed distance：
-
-* `D_out = distance_transform_edt(~M)`  （在外部点到最近 stroke 的距离）
-* `D_in  = distance_transform_edt(M)`   （在内部点到最近背景的距离）
-* **Signed distance：**
-  [
-  \phi = D_{out} - D_{in}
-  ]
-  性质：
-* `phi < 0`：在 stroke 内部
-* `phi = 0`：在边界附近
-* `phi > 0`：在外部
-
-> 这是真正的 SDF（对 mask 边界而言）。
-
-### 5.4 放大方法 A：Baseline（对 edge/stroke 直接插值）
-
-Baseline 用于对比（必实现，成本低）：
-
-* 输入：`edge_gray` 或 `M.astype(uint8)*255`
-* 放大：
-
-  * `cv2.resize(..., interpolation=cv2.INTER_CUBIC)`（bicubic）
-  * 或 `INTER_NEAREST`（展示块状锯齿）
-* 输出：`baseline_x{scale}.png`
-
-### 5.5 放大方法 B：SDF Upsample（核心）
-
-#### 5.5.1 Upsample SDF
-
-将低分辨率 `phi` 放大到高分辨率：
-
-* `phi_up = cv2.resize(phi, (W*scale, H*scale), interpolation=cv2.INTER_LINEAR)`
-* **距离尺度修正**：距离单位随像素缩放
-
-  * `phi_up = phi_up * scale`
-
-#### 5.5.2 从 SDF 渲染高分辨率线稿（抗锯齿）
-
-用一个可控的抗锯齿宽度 `aa_width`（单位：高分辨率像素）把 `phi_up` 映射到 alpha：
-
-定义 smoothstep（必须实现为函数，避免 banding）：
-
-* [
-  t = clamp\left(\frac{x-a}{b-a}, 0, 1\right)
-  ]
-* [
-  smoothstep(a,b,x) = t^2(3-2t)
-  ]
-
-将 SDF 转 alpha（stroke 内为 1，外为 0，边界平滑）：
-
-* 令 `a = -aa_width`，`b = +aa_width`
-* [
-  \alpha = 1 - smoothstep(-w, +w, \phi_{up})
-  ]
-  其中 `w = aa_width`
-
-输出灰度图：
-
-* `out = (alpha * 255).astype(uint8)`
-
-> 这样 SDF upsample 的结果会比直接 bicubic 的 edge 更“几何一致”，线条边界更稳定，锯齿更少。
-
-### 5.6 放大方法 C：PDE（在 Upsampled SDF 上做 PDE 迭代）
-
-这里给出一个足够“PDE 正统”、且实现难度适中的方案：
-**先 upsample 得到 `phi_up`，再用 PDE 做两步：**
-
-1. **Reinitialization PDE**：把 `phi_up` 重新拉回“接近距离函数”（满足 (|\nabla \phi| \approx 1)）
-2. **Mean Curvature Flow**：对 level set 做曲率平滑，抑制锯齿与小毛刺
-
-#### 5.6.1 Reinitialization PDE（Sussman 风格）
-
-目标 PDE：
-[
-\phi_t = -\operatorname{sgn}(\phi_0)\left(|\nabla\phi|-1\right)
-]
-
-离散化要求（必须）：
-
-* 使用中心差分近似梯度
-* 增加 epsilon 防止除零
-
-实现细节：
-
-* `phi0 = phi_up.copy()`
-* `sgn = phi0 / sqrt(phi0^2 + eps^2)`（eps 建议 1e-3 或 1e-2）
-* 中心差分：
-
-  * `phi_x = (phi[:,2:] - phi[:,:-2]) / 2`（对边界用 pad）
-  * `phi_y = (phi[2:,:] - phi[:-2,:]) / 2`
-* `grad = sqrt(phi_x^2 + phi_y^2 + eps)`
-* 显式迭代：
-
-  * `phi = phi - dt * sgn * (grad - 1)`
-
-参数建议：
-
-* `dt = 0.3`
-* `iters_reinit = 20`（demo 足够）
-
-#### 5.6.2 Mean Curvature Flow（对 level set 曲率平滑）
-
-曲率定义：
-[
-\kappa = \nabla \cdot \left(\frac{\nabla \phi}{|\nabla \phi|}\right)
-]
-
-演化 PDE（level set 形式）：
-[
-\phi_t = \kappa |\nabla \phi|
-]
-
-离散化步骤：
-
-1. 计算 `phi_x, phi_y, grad`
-2. 单位法向：
-
-   * `nx = phi_x / grad`
-   * `ny = phi_y / grad`
-3. 散度（中心差分）：
-
-   * `kappa = d(nx)/dx + d(ny)/dy`
-4. 更新：
-
-   * `phi = phi + dt * kappa * grad`
-
-参数建议：
-
-* `dt = 0.2`
-* `iters_curv = 10`
-
-#### 5.6.3 PDE 输出渲染
-
-对 PDE 后的 `phi` 同样用 5.5.2 的 SDF→alpha 渲染得到 `pde_x{scale}.png`
+* 输出 edge 相关结果（baseline/sdf/pde）默认应为**二值 PNG**（0/255）
+* original 可以原样或缩放后输出 PNG
 
 ---
 
-## 6. 质量与参数（必须在前端可调的最小集合）
+# 7. 核心算法细节（必须照做）
 
-前端至少提供：
+## 7.1 Edge Map 计算（Canny）
 
-* `scale`：2/4/8 下拉
-* `edge_dilate`：0~3 滑条（默认 1）
-* `aa_width`：0.5~2.0（默认 1.0）
-* （可选）`canny_sigma`：0.2~0.5（默认 0.33）
-* methods 勾选（baseline / sdf / pde）
+输入彩色图 `I`：
 
-默认值建议：
+1. 转灰度：
 
-* scale=4
-* canny_sigma=0.33
-* edge_dilate=1
-* aa_width=1.0
-* reinit=20 iters, curvature=10 iters
+* `G = cv2.cvtColor(I, cv2.COLOR_BGR2GRAY)`
 
----
+2. 高斯模糊（抑噪）：
 
-## 7. 前端展示规范（Side-by-side）
+* `G_blur = cv2.GaussianBlur(G, ksize=(0,0), sigmaX=blur_sigma)`
 
-### 页面布局（必须）
+3. Canny：
 
-* 第一行：上传控件 + 参数控件 + “Process” 按钮
-* 第二行：图像对比区，至少三列（CSS grid/flex）：
+* 若 `auto_canny=True`：
 
-  * Col 1: `Edge (original res)`（或原图+edge）
-  * Col 2: `Baseline x{scale}`
-  * Col 3: `SDF x{scale}`
-  * Col 4: `PDE x{scale}`（如果屏幕窄可以换行，但同方法同大小）
+  * `m = median(G_blur)`
+  * `low = max(0, (1 - sigma) * m)`，`high = min(255, (1 + sigma) * m)`
+  * 推荐 `sigma=0.33`
+* 否则使用用户给定的 `canny_low/canny_high`
 
-每个结果块：
+得到 `E`：uint8，0 或 255。
 
-* 标题（方法名 + scale）
-* `<img>` 宽度 100%，`image-rendering` 可选（不建议强制 pixelated，因为我们要展示平滑效果）
+4. 二值化到 {0,1}：
 
-### 前端交互（必须）
+* `E01 = (E > 0).astype(np.uint8)`
 
-* 点击 Process 后：
+5. （可选但推荐）细化 thinning（保证锐利&细线）
 
-  * disable 按钮
-  * 显示 “processing…”（文本即可）
-  * 成功返回后更新 `<img src=...>`，带 cache busting（如 `?t=timestamp`）
-* 失败时显示错误信息（alert 或页面 div）
+* 若有 `cv2.ximgproc.thinning`：
+
+  * `E_thin = cv2.ximgproc.thinning(E*255, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN)`
+  * `E01 = (E_thin > 0).astype(np.uint8)`
+* 否则可选实现 Zhang-Suen thinning（纯 numpy）
+
+输出 `E01`：0/1 edge map（原分辨率）。
 
 ---
 
-## 8. 后端实现要点（让 codex 少踩坑）
+## 7.2 方法0：Baseline 对照（必须有）
 
-1. **输入尺寸限制（必须）**
-   为避免 scale=8 爆内存：
+目的：给用户看到“普通放大”为何会糊（哪怕阈值后仍会锯齿/断裂）。
 
-   * 若输入最大边 > 1024，则按比例缩小到 1024（并在 meta 返回实际处理尺寸）
-2. **输出目录**
-   `static/out/` 若不存在就创建
-3. **文件命名**
-   用 `uuid4().hex` 作为 id，输出固定命名，便于前端引用
-4. **图像编码**
-   统一输出 PNG（灰度 8-bit）
-5. **数组边界**
-   PDE 中所有差分都需要 pad（reflect/edge），避免尺寸错位
-6. **性能**
-   PDE 迭代用 numpy 向量化，不要 python 双重 for 循环
+步骤：
+
+1. `U0 = cv2.resize(E01.astype(np.float32), (W*s, H*s), interpolation=cv2.INTER_CUBIC)`
+2. 阈值二值化：
+
+   * `E_base = (U0 >= 0.5).astype(np.uint8) * 255`
+3. 可选 thinning（默认开）：
+
+   * thinning 后再输出（保证“锐利”但仍作为对照）
+
+> 注意：baseline 仍然可能出现“粗糙/断裂/锯齿”，这是预期对照效果。
 
 ---
 
-## 9. requirements.txt（建议）
+## 7.3 方法1：SDF / Distance Field 放大（必须实现）
 
+核心思想：
+不要直接插值二值边缘，而是：
+
+1. 在低分辨率上计算到“最近边缘像素集合”的距离场 `D`
+2. 对距离场插值到高分辨率，并做**尺度修正**
+3. 用阈值从距离场重建高分辨率边缘（天然是陡峭边界 → 锐利）
+
+### 7.3.1 距离场定义（针对“线状边缘”用 unsigned distance 即可）
+
+给定 `E01`（edge=1，非edge=0），定义：
+
+* `D_lr(x) = dist(x, {p | E01(p)=1})`
+
+### 7.3.2 用 OpenCV distanceTransform 计算
+
+OpenCV 的 `distanceTransform` 是“到最近 0 像素的距离”。
+因此先构造：
+
+* `DT_in = (1 - E01)`，此时：
+
+  * edge 像素为 0
+  * 其他为 1
+
+计算：
+
+* `D_lr = cv2.distanceTransform(DT_in, distanceType=cv2.DIST_L2, maskSize=5)`
+  输出是 float32，单位是“低分辨率像素”。
+
+### 7.3.3 放大距离场 + 尺度修正（关键）
+
+直接 resize 只是在数值上插值，单位仍是低分辨率像素。
+高分辨率像素单位应乘上倍率 `s`：
+
+1. 插值到高分辨率：
+
+* `D_hi_raw = cv2.resize(D_lr, (W*s, H*s), interpolation=cv2.INTER_CUBIC)`
+
+2. 单位修正：
+
+* `D_hi = D_hi_raw * s`
+
+### 7.3.4 从距离场重建“锐利 edge map”
+
+给定输出线宽 `edge_width_hr`（单位：高分辨率像素），定义半径：
+
+* `r = edge_width_hr / 2`
+
+重建二值边缘：
+
+* `E_sdf = (D_hi <= r).astype(np.uint8) * 255`
+
+可选后处理：
+
+* thinning（默认开）：保持线条细且锐
+* 或轻微形态学 close（连接断裂）
+
+> 这一步是保证“锐利”的关键：最终输出是阈值后的二值边界，不会产生灰糊边。
+
+---
+
+## 7.4 方法2：PDE（Shock Filter PDE）放大（必须实现）
+
+核心思路：
+先得到一个高分辨率灰度边缘概率图 `U0`（例如 bicubic），然后用 PDE 数值迭代把过渡带“变陡”，最后阈值回二值。Shock Filter 的典型效果就是**边界锐化/阶跃化**。
+
+### 7.4.1 初始化
+
+* `U0 = resize(E01 float, bicubic)`，范围 [0,1]
+* `U = U0.copy()`
+
+### 7.4.2 Shock Filter PDE（离散形式）
+
+连续形式（直观理解）：
+
+* `u_t = - sign(Δu) * |∇u|`
+
+离散迭代（每步）：
+
+1. 计算梯度（中心差分）：
+
+* `ux = (U[:,2:] - U[:,:-2]) / 2`
+* `uy = (U[2:,:] - U[:-2,:]) / 2`
+  （边界可用复制 padding 或忽略边缘一圈）
+
+2. 梯度幅值：
+
+* `g = sqrt(ux^2 + uy^2 + eps)`
+
+3. 拉普拉斯（5点模板）：
+
+* `lap = U[i+1,j] + U[i-1,j] + U[i,j+1] + U[i,j-1] - 4*U[i,j]`
+
+4. `sign(lap)` 的平滑近似（避免数值不稳）：
+
+* `sign_lap = lap / sqrt(lap^2 + eps^2)`
+
+5. 更新：
+
+* `U_new = U - dt * sign_lap * g`
+
+6. （推荐）加入保真项，防止漂移：
+
+* `U_new += dt * lambda_fid * (U0 - U)`
+
+  * `lambda_fid` 默认 0.5 ~ 2.0
+
+7. clamp：
+
+* `U = clip(U_new, 0, 1)`
+
+迭代次数：
+
+* `iters` 默认 20（scale=4 时通常够）
+* `dt` 默认 0.2
+* `eps` 默认 1e-6
+
+### 7.4.3 阈值回二值，保证锐利
+
+* `E_pde = (U >= 0.5).astype(np.uint8) * 255`
+
+可选 thinning（默认开）：
+
+* thinning 保证边缘线细且锐利
+
+> PDE 输出必须二值化，否则会出现灰边。
+
+---
+
+# 8. 参数默认值建议（必须写进代码）
+
+* `scale=4`
+* `auto_canny=true`
+* `blur_sigma=1.0`
+* `edge_width_hr=1.5`（如果 thinning 开启，可以设 2.0 更稳）
+* `thinning=true`
+
+PDE 默认：
+
+* `pde_iters=20`
+* `pde_dt=0.2`
+* `pde_lambda_fid=1.0`
+* `pde_eps=1e-6`
+
+---
+
+# 9. 关键“锐利性”验收标准（必须满足）
+
+后端在返回前，必须确保：
+
+1. `baseline/sdf/pde` 三张结果图默认是**二值图**：像素值只包含 `{0, 255}`
+
+   * 可在代码里断言：`np.unique(img).subset({0,255})`
+2. SDF 输出不能直接对 edge 图插值作为最终结果，必须“距离场→阈值重建”
+3. 前端展示 edge 图时必须加 `image-rendering: pixelated;`，否则视觉上会被浏览器缩放插值“看起来变糊”
+
+---
+
+# 10. 代码模块划分（codex/gemini 生成时的强约束）
+
+## `backend/edge_pipeline.py`
+
+必须提供这些函数（命名可保持一致）：
+
+* `load_image(file_bytes) -> np.ndarray[BGR uint8]`
+
+* `encode_png_base64(img_uint8) -> "data:image/png;base64,..."`
+
+* `compute_edge_map(gray_uint8, auto_canny, canny_low, canny_high, blur_sigma, thinning) -> E01 uint8(0/1)`
+
+* `upscale_baseline(E01, scale, thinning) -> uint8(0/255)`
+
+* `upscale_sdf(E01, scale, edge_width_hr, thinning) -> uint8(0/255)`
+
+* `upscale_pde(E01, scale, iters, dt, lambda_fid, thinning) -> uint8(0/255)`
+
+## `backend/app.py`
+
+* FastAPI app
+* mount 静态文件 `/static`
+* `GET /` 返回 index.html
+* `POST /api/process` 调用 pipeline，返回 JSON（base64 images）
+
+---
+
+# 11. 前端实现要点（避免“看起来不锐利”的坑）
+
+在 `style.css`：
+
+```css
+.edge-img {
+  image-rendering: pixelated;
+  /* 兼容尝试 */
+  image-rendering: crisp-edges;
+}
 ```
-fastapi
-uvicorn[standard]
-python-multipart
-numpy
-opencv-python
-scipy
-```
 
-> 如果实现时想用 `scikit-image`（比如更方便的形态学），可加，但非必须。
+并且建议：
+
+* edge 图用原始像素尺寸显示或等比缩放（缩放也要 pixelated）
+* 每个方法下面加“下载 PNG”按钮：`<a download="sdf.png" href="...">Download</a>`
 
 ---
 
-## 10. README.md（必须包含的运行说明）
+# 12. README 必须包含
 
-* 安装依赖：`pip install -r requirements.txt`
-* 运行：`uvicorn app.main:app --reload --port 8000`
-* 打开：`http://localhost:8000`
-* 说明参数含义与方法差异（Baseline vs SDF vs PDE）
-
----
-
-## 11. 验收标准（Acceptance Criteria）
-
-1. 打开网页，上传图片，点击 Process，能返回并显示：
-
-   * 原 edge map
-   * baseline 放大结果
-   * sdf 放大结果
-   * pde 放大结果
-2. 调整 scale（2/4/8），输出尺寸随之变化，且方法结果不同可见：
-
-   * baseline 相对更糊/锯齿更明显
-   * sdf 边界更稳定、抗锯齿更自然
-   * pde 在 sdf 基础上减少局部毛刺/锯齿（更平滑）
-3. 不崩溃：对 512~1024 边长图片 scale=4 正常输出；scale=8 也能在限制下输出。
+* 项目简介（SDF vs PDE）
+* 安装与运行命令
+* 参数说明
+* 方法原理简述（尤其说明为什么 SDF/PDE 可以保持锐利）
 
 ---
 
-## 12. 给 codex/gemini-cli 的实现任务清单（可直接粘贴）
+# 13. 增强
 
-1. 创建目录结构与文件（见第 3 节）。
-2. 实现 `app/main.py`：
-
-   * FastAPI app
-   * `GET /` 返回 index.html
-   * mount `/static`
-   * `POST /api/process` 接收 multipart，调用 imaging/sdf/pde，保存输出，返回 JSON
-3. 实现 `app/imaging.py`：
-
-   * `load_image_from_upload(bytes)->np.ndarray`
-   * `resize_if_needed(img,max_side=1024)`
-   * `compute_edge_map(gray,sigma)->E_bool, edges_u8`
-   * `make_stroke_mask(E_bool, edge_dilate)->M_bool`
-4. 实现 `app/sdf.py`：
-
-   * `mask_to_sdf(M_bool)->phi(float32)`
-   * `upsample_sdf(phi, scale)->phi_up`
-   * `sdf_to_alpha(phi_up, aa_width)->u8`
-5. 实现 `app/pde.py`：
-
-   * `reinit_pde(phi_up, dt, iters, eps)->phi`
-   * `curvature_flow(phi, dt, iters, eps)->phi`
-6. 实现静态前端：
-
-   * `static/index.html`：上传、参数、按钮、结果容器（多列）
-   * `static/app.js`：fetch `/api/process`，更新图片
-   * `static/style.css`：grid/flex 多列对比
-7. README 与 requirements 完整。
+* 增加 `nearest` 放大对照（更像像素风）
+* 增加输出：`dist_field_preview`（把距离场可视化）
+* 增加一个“edge_width_hr”滑条，实时重建（前端只做显示，重建仍在后端）
+* 支持 Sobel/Scharr edge detector 切换
